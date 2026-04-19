@@ -29,10 +29,35 @@ def _today_in_tz(tz: str) -> date:
 
 def _login(page: Page, user: str, password: str) -> None:
     page.goto(SOLIS_LOGIN_URL, wait_until="networkidle")
-    page.get_by_placeholder(re.compile("user|email|account", re.I)).first.fill(user)
-    page.get_by_placeholder(re.compile("password", re.I)).first.fill(password)
-    page.get_by_role("button", name=re.compile("log ?in|sign ?in", re.I)).first.click()
-    page.wait_for_load_state("networkidle")
+    # Wait for SPA to render the login form
+    page.wait_for_selector("input[placeholder='Username/Email']", timeout=15000)
+
+    # Make sure we're on the Account tab (not Verification Code)
+    try:
+        page.get_by_text("Account", exact=True).first.click()
+    except Exception:
+        pass
+
+    page.locator("input[placeholder='Username/Email']").first.fill(user)
+    page.locator("input[placeholder='Password']").first.fill(password)
+
+    # Check the "I have read and agree to Privacy Policy" checkbox (required)
+    try:
+        agree = page.get_by_text(re.compile("I have read and agree", re.I)).first
+        # The checkbox is a sibling/parent element; click on the label triggers it
+        agree.click()
+    except Exception:
+        # fallback: click the second checkbox on the page (first is "Remember")
+        checkboxes = page.locator("input[type='checkbox']")
+        if checkboxes.count() >= 2:
+            checkboxes.nth(1).check()
+
+    page.get_by_role("button", name=re.compile("^log ?in$", re.I)).first.click()
+    # Wait for navigation away from the login page
+    try:
+        page.wait_for_url(lambda u: "login" not in u, timeout=20000)
+    except Exception:
+        page.wait_for_load_state("networkidle")
 
 
 def _extract_kwh(text: str) -> float | None:

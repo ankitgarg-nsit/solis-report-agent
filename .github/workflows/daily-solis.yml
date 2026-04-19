@@ -1,0 +1,42 @@
+name: Daily Solis Report
+
+on:
+  schedule:
+    # 07:00 IST = 01:30 UTC
+    - cron: "30 1 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run report
+        env:
+          SOLIS_USER: ${{ secrets.SOLIS_USER }}
+          SOLIS_PASS: ${{ secrets.SOLIS_PASS }}
+          WHATSAPP_TOKEN: ${{ secrets.WHATSAPP_TOKEN }}
+          WHATSAPP_PHONE_NUMBER_ID: ${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}
+          WHATSAPP_TO: ${{ secrets.WHATSAPP_TO }}
+          WHATSAPP_TEMPLATE_NAME: ${{ secrets.WHATSAPP_TEMPLATE_NAME }}
+          TIMEZONE: ${{ secrets.TIMEZONE }}
+          PLANT_NAME: ${{ secrets.PLANT_NAME }}
+        run: python main.py
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: artifacts/

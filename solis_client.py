@@ -32,26 +32,53 @@ def _today_in_tz(tz: str) -> date:
     return datetime.now(ZoneInfo(tz)).date()
 
 
-def _login(page: Page, user: str, password: str) -> None:
+def _login(page: Page, user: str, password: str, screenshot_dir: Path | None = None) -> None:
     page.goto(SOLIS_LOGIN_URL, wait_until="networkidle")
     page.wait_for_selector("input[placeholder='Username/Email']", timeout=15000)
-    try:
-        page.get_by_text("Account", exact=True).first.click()
-    except Exception:
-        pass
+
+    # Fill credentials
     page.locator("input[placeholder='Username/Email']").first.fill(user)
     page.locator("input[placeholder='Password']").first.fill(password)
+
+    # Toggle the "I have read and agree" checkbox by clicking its __inner span.
+    # Element-UI hides the real <input>, so we must click the visual marker.
+    # The "Remember" checkbox is already checked; we want the SECOND one.
     try:
-        agree = page.get_by_text(re.compile("I have read and agree", re.I)).first
-        agree.click()
-    except Exception:
-        checkboxes = page.locator("input[type='checkbox']")
-        if checkboxes.count() >= 2:
-            checkboxes.nth(1).check()
-    page.get_by_role("button", name=re.compile("^log ?in$", re.I)).first.click()
+        # Find all el-checkbox labels; click the inner of the unchecked one
+        inners = page.locator("label.el-checkbox:not(.is-checked) .el-checkbox__inner").all()
+        for inner in inners:
+            try:
+                inner.click(force=True, timeout=3000)
+                print("DEBUG: clicked unchecked checkbox inner")
+                break
+            except Exception as e:
+                print(f"DEBUG: checkbox inner click failed: {e}")
+    except Exception as e:
+        print(f"DEBUG: checkbox enumeration failed: {e}")
+
+    if screenshot_dir:
+        page.screenshot(path=str(screenshot_dir / "00-login-filled.png"), full_page=True)
+
+    # Now click Login; wait for the user/userLogin POST to fire
+    # (that's the real indicator that the form submitted)
+    try:
+        with page.expect_response(
+            lambda r: "/api/user/userLogin" in r.url or "/api/login" in r.url,
+            timeout=15000,
+        ):
+            page.get_by_role("button", name=re.compile("^log ?in$", re.I)).first.click()
+        print("DEBUG: login POST fired")
+    except Exception as e:
+        print(f"DEBUG: login POST did NOT fire in 15s: {e}")
+        # Fallback: just click and wait
+        page.get_by_role("button", name=re.compile("^log ?in$", re.I)).first.click()
+
+    # Wait for navigation away from login
     try:
         page.wait_for_url(lambda u: "login" not in u, timeout=20000)
+        print(f"DEBUG: login succeeded, now at {page.url}")
     except Exception:
+        print(f"DEBUG: still on login page after click — URL: {page.url}")
         page.wait_for_load_state("networkidle")
 
 
@@ -185,7 +212,7 @@ def fetch_yesterday(
             if screenshot_dir:
                 screenshot_dir.mkdir(parents=True, exist_ok=True)
 
-            _login(page, user, password)
+            _login(page, user, password, screenshot_dir)
 
             page.goto(SOLIS_PLANT_URL_TEMPLATE.format(plant_id=plant_id), wait_until="networkidle")
             page.wait_for_timeout(8000)

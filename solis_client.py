@@ -40,21 +40,31 @@ def _login(page: Page, user: str, password: str, screenshot_dir: Path | None = N
     page.locator("input[placeholder='Username/Email']").first.fill(user)
     page.locator("input[placeholder='Password']").first.fill(password)
 
-    # Toggle the "I have read and agree" checkbox by clicking its __inner span.
-    # Element-UI hides the real <input>, so we must click the visual marker.
-    # The "Remember" checkbox is already checked; we want the SECOND one.
+    # Toggle the "I have read and agree" checkbox via native DOM click so
+    # Vue picks up the reactivity and enables the Login button.
+    # (page.click() with force=True dispatches synthetic events that Vue ignores.)
+    toggled = page.evaluate("""
+    () => {
+      const labels = document.querySelectorAll('label.el-checkbox');
+      const results = [];
+      for (const lbl of labels) {
+        const isChecked = lbl.classList.contains('is-checked');
+        results.push({ text: (lbl.textContent || '').slice(0, 50), wasChecked: isChecked });
+        if (!isChecked) lbl.click();
+      }
+      return results;
+    }
+    """)
+    print(f"DEBUG: checkbox toggle via JS — labels: {toggled}")
+    page.wait_for_timeout(500)
+
+    # Confirm the Login button is now enabled before clicking
+    btn = page.get_by_role("button", name=re.compile("^log ?in$", re.I)).first
     try:
-        # Find all el-checkbox labels; click the inner of the unchecked one
-        inners = page.locator("label.el-checkbox:not(.is-checked) .el-checkbox__inner").all()
-        for inner in inners:
-            try:
-                inner.click(force=True, timeout=3000)
-                print("DEBUG: clicked unchecked checkbox inner")
-                break
-            except Exception as e:
-                print(f"DEBUG: checkbox inner click failed: {e}")
+        is_disabled = btn.is_disabled()
+        print(f"DEBUG: Login button disabled? {is_disabled}")
     except Exception as e:
-        print(f"DEBUG: checkbox enumeration failed: {e}")
+        print(f"DEBUG: could not check button state: {e}")
 
     if screenshot_dir:
         page.screenshot(path=str(screenshot_dir / "00-login-filled.png"), full_page=True)

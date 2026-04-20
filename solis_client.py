@@ -1,6 +1,11 @@
-"""Playwright scraper for SolisCloud daily generation + alerts."""
+"""Playwright scraper for SolisCloud daily generation + alerts.
+
+DEBUG MODE: dumps full HTML, screenshots, and complete network log on every run
+so we can identify the internal XHR endpoints and replay them directly.
+"""
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -11,7 +16,6 @@ from playwright.sync_api import Page, TimeoutError as PWTimeout, sync_playwright
 
 
 SOLIS_LOGIN_URL = "https://www.soliscloud.com/#/login"
-# SolisCloud uses a non-hash path for plant detail (confirmed via live inspection)
 SOLIS_PLANT_URL_TEMPLATE = "https://www.soliscloud.com/station/stationDetails/generalSituation/{plant_id}"
 
 
@@ -30,31 +34,21 @@ def _today_in_tz(tz: str) -> date:
 
 def _login(page: Page, user: str, password: str) -> None:
     page.goto(SOLIS_LOGIN_URL, wait_until="networkidle")
-    # Wait for SPA to render the login form
     page.wait_for_selector("input[placeholder='Username/Email']", timeout=15000)
-
-    # Make sure we're on the Account tab (not Verification Code)
     try:
         page.get_by_text("Account", exact=True).first.click()
     except Exception:
         pass
-
     page.locator("input[placeholder='Username/Email']").first.fill(user)
     page.locator("input[placeholder='Password']").first.fill(password)
-
-    # Check the "I have read and agree to Privacy Policy" checkbox (required)
     try:
         agree = page.get_by_text(re.compile("I have read and agree", re.I)).first
-        # The checkbox is a sibling/parent element; click on the label triggers it
         agree.click()
     except Exception:
-        # fallback: click the second checkbox on the page (first is "Remember")
         checkboxes = page.locator("input[type='checkbox']")
         if checkboxes.count() >= 2:
             checkboxes.nth(1).check()
-
     page.get_by_role("button", name=re.compile("^log ?in$", re.I)).first.click()
-    # Wait for navigation away from the login page
     try:
         page.wait_for_url(lambda u: "login" not in u, timeout=20000)
     except Exception:
@@ -62,8 +56,6 @@ def _login(page: Page, user: str, password: str) -> None:
 
 
 def _extract_kwh(text: str) -> float | None:
-    """Extract Daily Yield value from the Operating Data section."""
-    # Operating Data ... Daily Yield <num> kWh|MWh
     m = re.search(
         r"Operating Data[\s\S]{0,1200}?Daily Yield[\s\S]{0,80}?([\d,]+\.?\d*)\s*(k|M)Wh",
         text, re.I,
@@ -73,7 +65,6 @@ def _extract_kwh(text: str) -> float | None:
         if m.group(2).upper() == "M":
             value *= 1000
         return value
-    # Fallback: any Daily Yield
     m = re.search(r"Daily Yield[\s\S]{0,80}?([\d,]+\.?\d*)\s*(k|M)Wh", text, re.I)
     if m:
         value = float(m.group(1).replace(",", ""))
@@ -90,7 +81,7 @@ def _extract_alerts(text: str) -> list[str]:
         if not line or len(line) > 200:
             continue
         if line.lower() in ("alarm", "alert", "alarms", "alerts"):
-            continue  # skip menu labels
+            continue
         if re.search(r"\bfault\b|\boffline\b|\berror\b|\bwarning\b", line, re.I):
             alerts.append(line)
     seen, out = set(), []
@@ -101,6 +92,56 @@ def _extract_alerts(text: str) -> list[str]:
     return out[:3]
 
 
+def _dump_arrow_candidates(page: Page, path: Path) -> None:
+    """Find all plausible prev-date arrow candidates and dump metadata."""
+    try:
+        candidates_raw = page.evaluate("""
+        () => {
+            const selectors = [
+                '[class*="arrow-left"]',
+                '[class*="arrow"]',
+                '[class*="prev"]',
+                'i[class*="icon"]',
+                'span[class*="icon"]',
+                'button',
+            ];
+            const seen = new Set();
+            const out = [];
+            for (const sel of selectors) {
+                const els = document.querySelectorAll(sel);
+                for (const el of els) {
+                    if (seen.has(el)) continue;
+                    seen.add(el);
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
+                    // Climb up to find first ancestor with visible text
+                    let ancestor = el;
+                    let ancestor_text = '';
+                    for (let i = 0; i < 5 && ancestor; i++) {
+                        const t = (ancestor.textContent || '').trim();
+                        if (t && t.length < 200) { ancestor_text = t; break; }
+                        ancestor = ancestor.parentElement;
+                    }
+                    out.push({
+                        tag: el.tagName,
+                        class: el.className,
+                        text: (el.textContent || '').trim().slice(0, 100),
+                        aria_label: el.getAttribute('aria-label') || '',
+                        rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
+                        ancestor_text: ancestor_text.slice(0, 200),
+                    });
+                    if (out.length > 100) break;
+                }
+                if (out.length > 100) break;
+            }
+            return out;
+        }
+        """)
+        path.write_text(json.dumps(candidates_raw, indent=2), encoding="utf-8")
+    except Exception as e:
+        path.write_text(json.dumps({"error": str(e)}), encoding="utf-8")
+
+
 def fetch_yesterday(
     user: str,
     password: str,
@@ -109,28 +150,60 @@ def fetch_yesterday(
     screenshot_dir: Path | None = None,
 ) -> DailyReport:
     yesterday = _today_in_tz(tz) - timedelta(days=1)
+
+    network_log: list[dict] = []
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         ctx = browser.new_context(viewport={"width": 1440, "height": 900})
         page = ctx.new_page()
+
+        # Network logging — capture every response with body (if JSON/text)
+        def on_response(response):
+            try:
+                req = response.request
+                entry = {
+                    "url": response.url,
+                    "method": req.method,
+                    "status": response.status,
+                    "request_post_data": (req.post_data or "")[:5000],
+                    "content_type": response.headers.get("content-type", ""),
+                }
+                ct = entry["content_type"].lower()
+                if ("json" in ct or "text" in ct) and entry["status"] < 400:
+                    try:
+                        entry["response_body"] = response.text()[:30000]
+                    except Exception:
+                        entry["response_body"] = "<failed to read>"
+                network_log.append(entry)
+            except Exception:
+                pass
+
+        page.on("response", on_response)
+
         try:
+            if screenshot_dir:
+                screenshot_dir.mkdir(parents=True, exist_ok=True)
+
             _login(page, user, password)
 
-            # Navigate to the plant detail page
             page.goto(SOLIS_PLANT_URL_TEMPLATE.format(plant_id=plant_id), wait_until="networkidle")
-            page.wait_for_timeout(8000)  # let SPA route + charts populate
+            page.wait_for_timeout(8000)
 
-            # Debug: log where we ended up
-            print(f"DEBUG: URL after navigation: {page.url}")
+            print(f"DEBUG: URL after nav: {page.url}")
             print(f"DEBUG: Title: {page.title()}")
 
-            # Click date prev-arrow in the Operating Data section to go to yesterday.
-            # Try multiple selectors — SolisCloud's widget style has changed.
-            clicked = False
+            if screenshot_dir:
+                page.screenshot(path=str(screenshot_dir / "01-after-nav.png"), full_page=True)
+                _dump_arrow_candidates(page, screenshot_dir / "02-arrow-left-candidates.json")
+                (screenshot_dir / "03-page-before-click.html").write_text(
+                    page.content(), encoding="utf-8"
+                )
+
+            # Attempt prev-arrow click (best-effort, won't fail the run)
             for selector in [
                 ".el-icon-arrow-left",
                 "i.el-icon-arrow-left",
-                "span.el-icon-arrow-left",
                 "[class*='arrow-left']",
                 "button:has-text('<')",
             ]:
@@ -138,21 +211,20 @@ def fetch_yesterday(
                     loc = page.locator(selector).first
                     if loc.count() > 0 and loc.is_visible():
                         loc.click(timeout=3000)
-                        clicked = True
-                        print(f"DEBUG: Clicked prev-date using selector: {selector}")
+                        print(f"DEBUG: clicked with selector: {selector}")
+                        page.wait_for_timeout(4000)
                         break
                 except Exception as e:
                     print(f"DEBUG: selector {selector} failed: {e}")
-                    continue
-            if not clicked:
-                print("DEBUG: could not find prev-date arrow — will read today's yield")
-            page.wait_for_timeout(5000)
 
             text = page.inner_text("body")
-            print(f"DEBUG: Page text snippet (first 500 chars): {text[:500]}")
+            print(f"DEBUG: body text first 800 chars: {text[:800]}")
+
             if screenshot_dir:
-                screenshot_dir.mkdir(parents=True, exist_ok=True)
-                page.screenshot(path=str(screenshot_dir / "plant.png"), full_page=True)
+                page.screenshot(path=str(screenshot_dir / "04-after-click.png"), full_page=True)
+                (screenshot_dir / "05-page-after-click.html").write_text(
+                    page.content(), encoding="utf-8"
+                )
 
             return DailyReport(
                 report_date=yesterday,
@@ -162,9 +234,16 @@ def fetch_yesterday(
             )
         except PWTimeout as e:
             if screenshot_dir:
-                screenshot_dir.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(screenshot_dir / "error.png"), full_page=True)
             raise RuntimeError(f"Solis scrape timed out: {e}") from e
         finally:
+            # Always dump the network log
+            if screenshot_dir:
+                try:
+                    with open(screenshot_dir / "network.jsonl", "w", encoding="utf-8") as f:
+                        for entry in network_log:
+                            f.write(json.dumps(entry) + "\n")
+                except Exception as e:
+                    print(f"DEBUG: failed to write network log: {e}")
             ctx.close()
             browser.close()

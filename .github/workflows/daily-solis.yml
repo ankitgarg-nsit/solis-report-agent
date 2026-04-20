@@ -35,9 +35,9 @@ jobs:
           PLANT_NAME: ${{ secrets.PLANT_NAME }}
         run: python main.py
 
-      - name: Upload artifacts on failure
-        if: failure()
+      - name: Upload debug artifacts (always)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-screenshots
+          name: debug-artifacts
           path: artifacts/

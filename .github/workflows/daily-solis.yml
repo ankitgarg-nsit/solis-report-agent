@@ -26,6 +26,7 @@ jobs:
         env:
           SOLIS_USER: ${{ secrets.SOLIS_USER }}
           SOLIS_PASS: ${{ secrets.SOLIS_PASS }}
+          SOLIS_PLANT_ID: ${{ secrets.SOLIS_PLANT_ID }}
           WHATSAPP_TOKEN: ${{ secrets.WHATSAPP_TOKEN }}
           WHATSAPP_PHONE_NUMBER_ID: ${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}
           WHATSAPP_TO: ${{ secrets.WHATSAPP_TO }}

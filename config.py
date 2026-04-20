@@ -7,6 +7,7 @@ from dataclasses import dataclass
 class Config:
     solis_user: str
     solis_pass: str
+    solis_plant_id: str
     whatsapp_token: str
     whatsapp_phone_number_id: str
     whatsapp_to: str
@@ -25,6 +26,7 @@ def load() -> Config:
     return Config(
         solis_user=req("SOLIS_USER"),
         solis_pass=req("SOLIS_PASS"),
+        solis_plant_id=req("SOLIS_PLANT_ID"),
         whatsapp_token=req("WHATSAPP_TOKEN"),
         whatsapp_phone_number_id=req("WHATSAPP_PHONE_NUMBER_ID"),
         whatsapp_to=req("WHATSAPP_TO"),

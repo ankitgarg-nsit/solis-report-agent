@@ -13,7 +13,9 @@ def main() -> int:
     cfg = load()
     screenshot_dir = Path("artifacts")
     try:
-        report = fetch_yesterday(cfg.solis_user, cfg.solis_pass, cfg.timezone, screenshot_dir)
+        report = fetch_yesterday(
+            cfg.solis_user, cfg.solis_pass, cfg.timezone, cfg.solis_plant_id, screenshot_dir
+        )
         body = format_report(report, cfg.plant_name)
         print("Report:\n" + body)
         resp = send_template(

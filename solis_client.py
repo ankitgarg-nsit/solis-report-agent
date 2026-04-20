@@ -11,7 +11,7 @@ from playwright.sync_api import Page, TimeoutError as PWTimeout, sync_playwright
 
 
 SOLIS_LOGIN_URL = "https://www.soliscloud.com/#/login"
-SOLIS_OVERVIEW_URL = "https://www.soliscloud.com/#/station/stationoverview"
+SOLIS_PLANT_URL_TEMPLATE = "https://www.soliscloud.com/#/station/stationDetails/generalSituation/{plant_id}"
 
 
 @dataclass
@@ -61,30 +61,52 @@ def _login(page: Page, user: str, password: str) -> None:
 
 
 def _extract_kwh(text: str) -> float | None:
-    m = re.search(r"(?:today|daily)[^0-9]{0,30}([0-9]+(?:\.[0-9]+)?)\s*k(?:Wh|wh)", text, re.I)
+    """Extract Daily Yield value from the Operating Data section."""
+    # Operating Data ... Daily Yield <num> kWh|MWh
+    m = re.search(
+        r"Operating Data[\s\S]{0,1200}?Daily Yield[\s\S]{0,80}?([\d,]+\.?\d*)\s*(k|M)Wh",
+        text, re.I,
+    )
     if m:
-        return float(m.group(1))
-    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*k(?:Wh|wh)", text)
-    return float(m.group(1)) if m else None
+        value = float(m.group(1).replace(",", ""))
+        if m.group(2).upper() == "M":
+            value *= 1000
+        return value
+    # Fallback: any Daily Yield
+    m = re.search(r"Daily Yield[\s\S]{0,80}?([\d,]+\.?\d*)\s*(k|M)Wh", text, re.I)
+    if m:
+        value = float(m.group(1).replace(",", ""))
+        if m.group(2).upper() == "M":
+            value *= 1000
+        return value
+    return None
 
 
 def _extract_alerts(text: str) -> list[str]:
     alerts: list[str] = []
     for line in text.splitlines():
         line = line.strip()
-        if not line:
+        if not line or len(line) > 200:
             continue
-        if re.search(r"alarm|alert|fault|warning|error", line, re.I):
+        if line.lower() in ("alarm", "alert", "alarms", "alerts"):
+            continue  # skip menu labels
+        if re.search(r"\bfault\b|\boffline\b|\berror\b|\bwarning\b", line, re.I):
             alerts.append(line)
     seen, out = set(), []
     for a in alerts:
         if a not in seen:
             seen.add(a)
             out.append(a)
-    return out[:5]
+    return out[:3]
 
 
-def fetch_yesterday(user: str, password: str, tz: str, screenshot_dir: Path | None = None) -> DailyReport:
+def fetch_yesterday(
+    user: str,
+    password: str,
+    tz: str,
+    plant_id: str,
+    screenshot_dir: Path | None = None,
+) -> DailyReport:
     yesterday = _today_in_tz(tz) - timedelta(days=1)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -92,17 +114,30 @@ def fetch_yesterday(user: str, password: str, tz: str, screenshot_dir: Path | No
         page = ctx.new_page()
         try:
             _login(page, user, password)
-            page.goto(SOLIS_OVERVIEW_URL, wait_until="networkidle")
-            page.wait_for_timeout(3000)
+
+            # Navigate to the plant detail page
+            page.goto(SOLIS_PLANT_URL_TEMPLATE.format(plant_id=plant_id), wait_until="networkidle")
+            page.wait_for_timeout(5000)  # let charts/data populate
+
+            # Click date prev-arrow in the Operating Data section to go to yesterday.
+            # Element-UI uses .el-icon-arrow-left for navigation arrows.
+            try:
+                page.locator(".el-icon-arrow-left").first.click(timeout=5000)
+                page.wait_for_timeout(4000)
+            except Exception:
+                # Fallback: look for a button whose sibling contains a date string
+                pass
+
             text = page.inner_text("body")
             if screenshot_dir:
                 screenshot_dir.mkdir(parents=True, exist_ok=True)
-                page.screenshot(path=str(screenshot_dir / "overview.png"), full_page=True)
+                page.screenshot(path=str(screenshot_dir / "plant.png"), full_page=True)
+
             return DailyReport(
                 report_date=yesterday,
                 generation_kwh=_extract_kwh(text),
                 alerts=_extract_alerts(text),
-                raw_text=text[:2000],
+                raw_text=text[:3000],
             )
         except PWTimeout as e:
             if screenshot_dir:

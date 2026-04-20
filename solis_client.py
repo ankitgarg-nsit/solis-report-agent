@@ -69,19 +69,21 @@ def _login(page: Page, user: str, password: str, screenshot_dir: Path | None = N
     if screenshot_dir:
         page.screenshot(path=str(screenshot_dir / "00-login-filled.png"), full_page=True)
 
-    # Now click Login; wait for the user/userLogin POST to fire
-    # (that's the real indicator that the form submitted)
+    # There are TWO "Login" buttons in the DOM (one hidden). Use :visible filter.
+    login_btn = page.locator("button.el-button--primary:has-text('Login'):visible").first
     try:
         with page.expect_response(
             lambda r: "/api/user/userLogin" in r.url or "/api/login" in r.url,
             timeout=15000,
         ):
-            page.get_by_role("button", name=re.compile("^log ?in$", re.I)).first.click()
+            login_btn.click()
         print("DEBUG: login POST fired")
     except Exception as e:
         print(f"DEBUG: login POST did NOT fire in 15s: {e}")
-        # Fallback: just click and wait
-        page.get_by_role("button", name=re.compile("^log ?in$", re.I)).first.click()
+        try:
+            login_btn.click(force=True)
+        except Exception as e2:
+            print(f"DEBUG: force click also failed: {e2}")
 
     # Wait for navigation away from login
     try:

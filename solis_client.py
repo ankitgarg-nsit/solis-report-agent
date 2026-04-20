@@ -11,7 +11,8 @@ from playwright.sync_api import Page, TimeoutError as PWTimeout, sync_playwright
 
 
 SOLIS_LOGIN_URL = "https://www.soliscloud.com/#/login"
-SOLIS_PLANT_URL_TEMPLATE = "https://www.soliscloud.com/#/station/stationDetails/generalSituation/{plant_id}"
+# SolisCloud uses a non-hash path for plant detail (confirmed via live inspection)
+SOLIS_PLANT_URL_TEMPLATE = "https://www.soliscloud.com/station/stationDetails/generalSituation/{plant_id}"
 
 
 @dataclass
@@ -117,18 +118,38 @@ def fetch_yesterday(
 
             # Navigate to the plant detail page
             page.goto(SOLIS_PLANT_URL_TEMPLATE.format(plant_id=plant_id), wait_until="networkidle")
-            page.wait_for_timeout(5000)  # let charts/data populate
+            page.wait_for_timeout(8000)  # let SPA route + charts populate
+
+            # Debug: log where we ended up
+            print(f"DEBUG: URL after navigation: {page.url}")
+            print(f"DEBUG: Title: {page.title()}")
 
             # Click date prev-arrow in the Operating Data section to go to yesterday.
-            # Element-UI uses .el-icon-arrow-left for navigation arrows.
-            try:
-                page.locator(".el-icon-arrow-left").first.click(timeout=5000)
-                page.wait_for_timeout(4000)
-            except Exception:
-                # Fallback: look for a button whose sibling contains a date string
-                pass
+            # Try multiple selectors — SolisCloud's widget style has changed.
+            clicked = False
+            for selector in [
+                ".el-icon-arrow-left",
+                "i.el-icon-arrow-left",
+                "span.el-icon-arrow-left",
+                "[class*='arrow-left']",
+                "button:has-text('<')",
+            ]:
+                try:
+                    loc = page.locator(selector).first
+                    if loc.count() > 0 and loc.is_visible():
+                        loc.click(timeout=3000)
+                        clicked = True
+                        print(f"DEBUG: Clicked prev-date using selector: {selector}")
+                        break
+                except Exception as e:
+                    print(f"DEBUG: selector {selector} failed: {e}")
+                    continue
+            if not clicked:
+                print("DEBUG: could not find prev-date arrow — will read today's yield")
+            page.wait_for_timeout(5000)
 
             text = page.inner_text("body")
+            print(f"DEBUG: Page text snippet (first 500 chars): {text[:500]}")
             if screenshot_dir:
                 screenshot_dir.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(screenshot_dir / "plant.png"), full_page=True)

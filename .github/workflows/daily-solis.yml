@@ -10,18 +10,37 @@ on:
 jobs:
   report:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 20 min (was 10): on 2026-04-22 the Playwright Chromium download was
+    # slow from Microsoft's CDN and the install step timed out at 10m11s.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
-      - name: Install deps
-        run: |
-          pip install -r requirements.txt
-          playwright install --with-deps chromium
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      # Cache the Playwright browser binary (~150MB) so we don't
+      # re-download Chromium on every run. Key is bumped when the
+      # Playwright version in requirements.txt changes.
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium (+ system deps)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install --with-deps chromium
+
+      - name: Install Playwright system deps only (cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
 
       - name: Run report
         env:

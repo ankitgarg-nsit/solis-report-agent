@@ -2,9 +2,9 @@ name: Daily Solis Report
 
 on:
   schedule:
-    # 09:17 IST = 03:47 UTC. Off-the-hour minute (:47) avoids the heavy
+    # 07:17 IST = 01:47 UTC. Off-the-hour minute (:47) avoids the heavy
     # GitHub Actions cron queue contention at :00 / :15 / :30 / :45.
-    - cron: "47 3 * * *"
+    - cron: "47 1 * * *"
   workflow_dispatch: {}
 
 jobs:
